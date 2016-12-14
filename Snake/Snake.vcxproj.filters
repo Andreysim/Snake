@@ -36,5 +36,14 @@
     <Image Include="food.bmp">
       <Filter>Resource Files</Filter>
     </Image>
+    <Image Include="options.bmp">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="newgame.bmp">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="toolbar_imgs.bmp">
+      <Filter>Resource Files</Filter>
+    </Image>
   </ItemGroup>
 </Project>
