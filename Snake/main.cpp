@@ -75,6 +75,7 @@ public:
 	uint32_t BodySize() const;
 	void Eat();
 	bool Move(uint32_t fieldWidth, uint32_t fieldHeight);
+	bool IsValidDirection(Direction dir) const;
 	bool IsBody(POINT testPoint) const;
 	void Draw(HDC hdc, uint32_t indent) const;
 	const std::vector<POINT>& Body() const;
@@ -101,14 +102,15 @@ private:
 
 struct ToolBar
 {
+	enum ImgInd { OptImg, NewGameImg, UnpauseImg, PauseImg, CountImg };
 	ToolBar() : hToolBar(nullptr) {}
 	ToolBar(DWORD style, int x, int y, int w, int h, HWND parent, UINT id, HINSTANCE hInst, UINT imgId)
 	{
 		constexpr int nButtons = 3;
 
 		hToolBar = CreateWindowEx(0, TOOLBARCLASSNAME, nullptr, style, x, y, w, h, parent, (HMENU)id, hInst, nullptr);
-		hImgList = ImageList_Create(BtnSize, BtnSize, ILC_COLOR16 | ILC_MASK, nButtons, 0);
-		HBITMAP hTBBM = (HBITMAP)LoadImage(hInst, MAKEINTRESOURCE(IDB_TOOLBAR), IMAGE_BITMAP, nButtons * BtnSize, BtnSize, LR_LOADTRANSPARENT);
+		hImgList = ImageList_Create(BtnSize, BtnSize, ILC_COLOR16 | ILC_MASK, ImgInd::CountImg, 0);
+		HBITMAP hTBBM = (HBITMAP)LoadImage(hInst, MAKEINTRESOURCE(IDB_TOOLBAR), IMAGE_BITMAP, ImgInd::CountImg * BtnSize, BtnSize, LR_LOADTRANSPARENT);
 		ImageList_Add(hImgList, hTBBM, nullptr);
 		DeleteObject(hTBBM);
 
@@ -147,13 +149,13 @@ private:
 	ATOM RegisterWindowClass();
 	void CreateMainWindow(int showCmd);
 	void InitNewGame();
+	void EndGame();
 	void ResizeGameArea(uint32_t w, uint32_t h);
 	LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 	int KeyPressed(int vKey) const;
 	void OnKeyboardInput();
 	void OnNotify(HWND hwnd, int id, LPNMHDR phdr);
 	void OnKeyDown(HWND hwnd, UINT vk, BOOL fDown, int cRepeat, UINT flags);
-	//void OnCreate();
 	void OnPaint();
 	void Options();
 	void NewGame();
@@ -254,6 +256,16 @@ bool Snake::Move(uint32_t fieldWidth, uint32_t fieldHeight)
 	}
 	return true;
 }
+bool Snake::IsValidDirection(Direction dir) const
+{
+	Direction wrongDir;
+	POINT prevHead = body[headInd == 0 ? body.size() - 1 : headInd - 1];
+	if(body[headInd].x == prevHead.x)
+		wrongDir = body[headInd].y < prevHead.y ? Direction::DOWN : Direction::UP;
+	else
+		wrongDir = body[headInd].x < prevHead.x ? Direction::RIGHT : Direction::LEFT;
+	return dir != wrongDir;
+}
 bool Snake::IsBody(POINT testPoint) const
 {
 	for(const auto& p : body)
@@ -348,7 +360,12 @@ App::~App()
 inline App* App::GetApp() { return App::pApp; }
 inline HINSTANCE App::AppInstance() { return hInst; }
 inline int App::KeyPressed(int vKey) const { return 0x8000 & GetAsyncKeyState(vKey); }
-inline void App::Pause() { paused = !paused; }
+inline void App::EndGame() { running = false; }
+inline void App::Pause()
+{
+	SendMessage(toolBar.hToolBar, TB_CHANGEBITMAP, (WPARAM)ID_PAUSE_BTN, (LPARAM)(paused ? toolBar.PauseImg : toolBar.UnpauseImg));
+	paused = !paused; 
+}
 inline void App::NewGame()
 {
 	InitNewGame();
@@ -440,6 +457,8 @@ void App::InitNewGame()
 	food = std::make_unique<Food>();
 	timer = std::make_unique<Timer>();
 	SpawnFood();
+
+	SendMessage(toolBar.hToolBar, TB_CHANGEBITMAP, ID_PAUSE_BTN, (LPARAM)toolBar.UnpauseImg);
 }
 void App::ResizeGameArea(uint32_t w, uint32_t h)
 {
@@ -457,13 +476,13 @@ void App::OnKeyboardInput()
 {
 	if(paused)
 		return;
-	if(KeyPressed(VK_LEFT) && snake->GetDirection() != Snake::Direction::RIGHT)
+	if(KeyPressed(VK_LEFT) && snake->IsValidDirection(Snake::Direction::LEFT))
 		snake->SetDirection(Snake::Direction::LEFT);
-	else if(KeyPressed(VK_RIGHT) && snake->GetDirection() != Snake::Direction::LEFT)
+	else if(KeyPressed(VK_RIGHT) && snake->IsValidDirection(Snake::Direction::RIGHT))
 		snake->SetDirection(Snake::Direction::RIGHT);
-	else if(KeyPressed(VK_UP) && snake->GetDirection() != Snake::Direction::DOWN)
+	else if(KeyPressed(VK_UP) && snake->IsValidDirection(Snake::Direction::UP))
 		snake->SetDirection(Snake::Direction::UP);
-	else if(KeyPressed(VK_DOWN) && snake->GetDirection() != Snake::Direction::UP)
+	else if(KeyPressed(VK_DOWN) && snake->IsValidDirection(Snake::Direction::DOWN))
 		snake->SetDirection(Snake::Direction::DOWN);
 }
 void App::OnKeyDown(HWND hwnd, UINT vk, BOOL fDown, int cRepeat, UINT flags)
@@ -538,13 +557,13 @@ void App::Update()
 	if(!snake->Move(width, height))
 	{
 		MessageBox(hMainWnd, _T("GAME OVER!"), _T("Message"), MB_OK);
-		running = false;
+		EndGame();
 		return;
 	}
 	if(snake->BodySize() == width * height)
 	{
 		MessageBox(hMainWnd, _T("You reached maximum snake length!"), _T("Message"), MB_OK);
-		running = false;
+		EndGame();
 		return;
 	}
 	if(snake->GetHead() == food->GetPos())
