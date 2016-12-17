@@ -1,3 +1,13 @@
+#if defined _M_IX86
+#pragma comment(linker,"/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='x86' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#elif defined _M_IA64
+#pragma comment(linker,"/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='ia64' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#elif defined _M_X64
+#pragma comment(linker,"/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='amd64' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#else
+#pragma comment(linker,"/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#endif
+
 #define NOMINMAX
 
 #include <vector>
@@ -21,6 +31,7 @@ enum class Error
 	AlreadyExistErr,
 };
 
+constexpr int nButtons = 3;
 constexpr int BtnSize = 24;
 constexpr uint32_t BlockSize = 24;
 constexpr uint32_t MinWidth = 8;
@@ -106,14 +117,14 @@ struct ToolBar
 	ToolBar() : hToolBar(nullptr) {}
 	ToolBar(DWORD style, int x, int y, int w, int h, HWND parent, UINT id, HINSTANCE hInst, UINT imgId)
 	{
-		constexpr int nButtons = 3;
-
 		hToolBar = CreateWindowEx(0, TOOLBARCLASSNAME, nullptr, style, x, y, w, h, parent, (HMENU)id, hInst, nullptr);
-		hImgList = ImageList_Create(BtnSize, BtnSize, ILC_COLOR16 | ILC_MASK, ImgInd::CountImg, 0);
-		HBITMAP hTBBM = (HBITMAP)LoadImage(hInst, MAKEINTRESOURCE(IDB_TOOLBAR), IMAGE_BITMAP, ImgInd::CountImg * BtnSize, BtnSize, LR_LOADTRANSPARENT);
-		ImageList_Add(hImgList, hTBBM, nullptr);
+		hImgList = ImageList_Create(BtnSize, BtnSize, ILC_COLOR | ILC_MASK, ImgInd::CountImg, 0);
+
+		HBITMAP hTBBM = (HBITMAP)LoadImage(hInst, MAKEINTRESOURCE(imgId), IMAGE_BITMAP, ImgInd::CountImg * BtnSize, BtnSize, LR_DEFAULTCOLOR);
+		ImageList_AddMasked(hImgList, hTBBM, RGB(255, 255, 255));
 		DeleteObject(hTBBM);
 
+		
 		TBBUTTON tbBtns[nButtons] =
 		{
 			{ 0, ID_OPT_BTN,      TBSTATE_ENABLED, BTNS_BUTTON | BTNS_NOPREFIX | BTNS_AUTOSIZE, {0}, 0, 0 },
@@ -125,14 +136,25 @@ struct ToolBar
 		SendMessage(hToolBar, TB_SETIMAGELIST, 0, (LPARAM)hImgList);
 		SendMessage(hToolBar, TB_ADDBUTTONS, (WPARAM)nButtons, (LPARAM)&tbBtns);
 		SendMessage(hToolBar, TB_AUTOSIZE, 0, 0);
+
+		RECT rc;
+		SendMessage(hToolBar, TB_GETRECT, ID_PAUSE_BTN, (LPARAM)&rc);
+
+		hStaticScore = CreateWindowEx(0, WC_STATIC, _T("SCORE: 0"),
+			WS_CHILD | WS_VISIBLE |  SS_LEFTNOWORDWRAP | SS_CENTERIMAGE, 
+			rc.right + 10, rc.top, 100, rc.bottom - rc.top,
+			hToolBar, (HMENU)ID_SCORE, hInst, nullptr);
+
 		ShowWindow(hToolBar, SW_SHOW);
 	}
 	void Destroy() 
 	{
 		DestroyWindow(hToolBar);
+		DestroyWindow(hStaticScore);
 		ImageList_Destroy(hImgList);
 	}
 	HWND hToolBar;
+	HWND hStaticScore;
 	HIMAGELIST hImgList;
 };
 
@@ -162,6 +184,7 @@ private:
 	void Pause();
 	void SpawnFood();
 	void Update();
+	void OutScore() const;
 private:
 	static App* pApp;
 	static HINSTANCE hInst;
@@ -172,6 +195,7 @@ private:
 	uint32_t vertIndent;
 	uint32_t width;
 	uint32_t height;
+	uint32_t score;
 
 	std::unique_ptr<Snake> snake;
 	std::unique_ptr<Food> food;
@@ -256,15 +280,15 @@ bool Snake::Move(uint32_t fieldWidth, uint32_t fieldHeight)
 	}
 	return true;
 }
-bool Snake::IsValidDirection(Direction dir) const
+bool Snake::IsValidDirection(Direction testDir) const
 {
-	Direction wrongDir;
+	Direction invalidDir;
 	POINT prevHead = body[headInd == 0 ? body.size() - 1 : headInd - 1];
 	if(body[headInd].x == prevHead.x)
-		wrongDir = body[headInd].y < prevHead.y ? Direction::DOWN : Direction::UP;
+		invalidDir = body[headInd].y < prevHead.y ? Direction::DOWN : Direction::UP;
 	else
-		wrongDir = body[headInd].x < prevHead.x ? Direction::RIGHT : Direction::LEFT;
-	return dir != wrongDir;
+		invalidDir = body[headInd].x < prevHead.x ? Direction::RIGHT : Direction::LEFT;
+	return testDir != invalidDir;
 }
 bool Snake::IsBody(POINT testPoint) const
 {
@@ -337,7 +361,7 @@ LRESULT CALLBACK App::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	}
 	return 0;
 }
-App::App(HINSTANCE hInstance, int showCmd) : vertIndent(0), width(10), height(10), timeStep(0.3), running(false), paused(false)
+App::App(HINSTANCE hInstance, int showCmd) : vertIndent(0), width(10), height(10), score(0), timeStep(0.3), running(false), paused(false)
 {
 	if(pApp)
 		throw Error::AlreadyExistErr;
@@ -357,20 +381,31 @@ App::~App()
 	UnregisterClass(_T("SnakeMainWndClass"), hInst);
 	pApp = nullptr; 
 }
-inline App* App::GetApp() { return App::pApp; }
+
+inline App* App::GetApp() {	return App::pApp; }
 inline HINSTANCE App::AppInstance() { return hInst; }
 inline int App::KeyPressed(int vKey) const { return 0x8000 & GetAsyncKeyState(vKey); }
 inline void App::EndGame() { running = false; }
 inline void App::Pause()
 {
-	SendMessage(toolBar.hToolBar, TB_CHANGEBITMAP, (WPARAM)ID_PAUSE_BTN, (LPARAM)(paused ? toolBar.PauseImg : toolBar.UnpauseImg));
-	paused = !paused; 
+	if(running)
+	{
+		SendMessage(toolBar.hToolBar, TB_CHANGEBITMAP, (WPARAM)ID_PAUSE_BTN, (LPARAM)(paused ? toolBar.PauseImg : toolBar.UnpauseImg));
+		paused = !paused;
+	}
 }
 inline void App::NewGame()
 {
 	InitNewGame();
 	RedrawWindow(hMainWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE);
 }
+inline void App::OutScore() const
+{
+	TCHAR buf[16] = { 0 };
+	_stprintf_s(buf, _T("SCORE: %d"), score);
+	SetWindowText(toolBar.hStaticScore, buf);
+}
+
 void App::Options()
 {
 	OptDlgParam param(width, height);
@@ -487,6 +522,11 @@ void App::OnKeyboardInput()
 }
 void App::OnKeyDown(HWND hwnd, UINT vk, BOOL fDown, int cRepeat, UINT flags)
 {
+	_CRT_UNUSED(hwnd);
+	_CRT_UNUSED(fDown);
+	_CRT_UNUSED(cRepeat);
+	_CRT_UNUSED(flags);
+
 	if(vk == 'P')
 		Pause();
 	else if(vk == 'O')
@@ -496,6 +536,9 @@ void App::OnKeyDown(HWND hwnd, UINT vk, BOOL fDown, int cRepeat, UINT flags)
 }
 void App::OnNotify(HWND hwnd, int id, LPNMHDR phdr)
 {
+	_CRT_UNUSED(hwnd);
+	_CRT_UNUSED(id);
+
 	if(phdr->idFrom == ID_TOOLBAR)
 	{
 		if(phdr->code == TBN_GETINFOTIP)
@@ -510,7 +553,7 @@ void App::OnNotify(HWND hwnd, int id, LPNMHDR phdr)
 					ptbit->pszText = _T("Start new game (N)");
 					break;
 				case ID_PAUSE_BTN:
-					ptbit->pszText = _T("Pause (P)");
+					ptbit->pszText = paused ? _T("Resume (P)") : _T("Pause (P)");
 					break;
 			}
 			ptbit->cchTextMax = _tcslen(ptbit->pszText) + 1;
@@ -544,7 +587,7 @@ void App::SpawnFood()
 	for(auto& i : freeInd)
 		i = val++;
 	for(const auto& p : snake->Body())
-		freeInd[width * p.y + p.x] = -1;
+		freeInd[width * p.y + p.x] = std::numeric_limits<uint32_t>::max();
 	freeInd.erase(std::remove(freeInd.begin(), freeInd.end(), (uint32_t)-1), freeInd.end());
 
 	RandGen<uint32_t> rgen(0, freeInd.size() - 1);
@@ -570,6 +613,9 @@ void App::Update()
 	{
 		snake->Eat();
 		SpawnFood();
+
+		++score;
+		OutScore();		
 	}
 	RedrawWindow(hMainWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE);
 }
