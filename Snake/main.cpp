@@ -38,6 +38,8 @@ constexpr uint32_t MinWidth = 8;
 constexpr uint32_t MinHeight = 8;
 constexpr uint32_t MaxWidth = 32;
 constexpr uint32_t MaxHeight = 32;
+constexpr COLORREF BkColor = RGB(192, 192, 192);
+
 
 inline bool operator == (const POINT& p1, const POINT& p2) { return p1.x == p2.x && p1.y == p2.y; }
 inline bool operator != (const POINT& p1, const POINT& p2) { return !(p1 == p2); }
@@ -71,15 +73,16 @@ class Snake
 public:
 	enum Direction 
 	{
-		LEFT = VK_LEFT, 
-		UP = VK_UP, 
-		RIGHT = VK_RIGHT,
-		DOWN = VK_DOWN, 
+		UP = 0, 
+		DOWN = 1, 
+		RIGHT = 2,
+		LEFT = 3, 
 	};
 
-	Snake(uint32_t fieldWidth, uint32_t fieldHeight);
+	Snake();
 	~Snake();
 
+	void Reset(uint32_t fieldWidth, uint32_t fieldHeight);
 	Direction GetDirection() const;
 	void SetDirection(Direction d);
 	POINT GetHead() const;
@@ -91,10 +94,13 @@ public:
 	void Draw(HDC hdc, uint32_t indent) const;
 	const std::vector<POINT>& Body() const;
 private:
+	void DrawBlock(HDC hdc, POINT p, uint32_t indent, int imgInd) const;
+	Direction GetDirection(POINT p1, POINT p2) const;
+
 	std::vector<POINT> body;
 	uint32_t headInd;
 	Direction dir;
-	HBITMAP hBitMap;
+	HIMAGELIST hImgList;
 	bool foodEaten;
 };
 
@@ -118,13 +124,15 @@ struct ToolBar
 	ToolBar(DWORD style, int x, int y, int w, int h, HWND parent, UINT id, HINSTANCE hInst, UINT imgId)
 	{
 		hToolBar = CreateWindowEx(0, TOOLBARCLASSNAME, nullptr, style, x, y, w, h, parent, (HMENU)id, hInst, nullptr);
-		hImgList = ImageList_Create(BtnSize, BtnSize, ILC_COLOR | ILC_MASK, ImgInd::CountImg, 0);
+		hImgList = ImageList_Create(BtnSize, BtnSize, ILC_COLOR32 | ILC_MASK, ImgInd::CountImg, 0);
 
-		HBITMAP hTBBM = (HBITMAP)LoadImage(hInst, MAKEINTRESOURCE(imgId), IMAGE_BITMAP, ImgInd::CountImg * BtnSize, BtnSize, LR_DEFAULTCOLOR);
-		ImageList_AddMasked(hImgList, hTBBM, RGB(255, 255, 255));
+		HBITMAP hTBBM = (HBITMAP)LoadImage(hInst, MAKEINTRESOURCE(imgId), IMAGE_BITMAP, ImgInd::CountImg * BtnSize, BtnSize, 0);
+		HBITMAP hMaskBM = (HBITMAP)LoadImage(hInst, MAKEINTRESOURCE(imgId), IMAGE_BITMAP, ImgInd::CountImg * BtnSize, BtnSize, LR_MONOCHROME);
+		ImageList_SetBkColor(hImgList, RGB(255, 255, 255));
+		ImageList_Add(hImgList, hTBBM, hMaskBM);
+		DeleteObject(hMaskBM);
 		DeleteObject(hTBBM);
-
-		
+	
 		TBBUTTON tbBtns[nButtons] =
 		{
 			{ 0, ID_OPT_BTN,      TBSTATE_ENABLED, BTNS_BUTTON | BTNS_NOPREFIX | BTNS_AUTOSIZE, {0}, 0, 0 },
@@ -170,7 +178,6 @@ private:
 	static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 	ATOM RegisterWindowClass();
 	void CreateMainWindow(int showCmd);
-	void InitNewGame();
 	void EndGame();
 	void ResizeGameArea(uint32_t w, uint32_t h);
 	LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -237,20 +244,42 @@ inline double Timer::Elapsed() const { return static_cast<double>(curr.QuadPart 
 
 
 // Snake class methods ------------------------------------------------------------------------------------------------
-Snake::Snake(uint32_t fieldWidth, uint32_t fieldHeight) : headInd(3), dir(Direction::UP), foodEaten(false)
+Snake::Snake() : headInd(~0), dir(Direction::UP), foodEaten(false)
 {
-	hBitMap = LoadBitmap(App::AppInstance(), MAKEINTRESOURCE(IDB_SNAKE));
-	POINT p = { (LONG)fieldWidth / 2, (LONG)fieldHeight / 2 + 2 };
-	for(int i = 0; i < 4; ++i, --p.y)
-		body.emplace_back(p);
+	constexpr int ImgCnt = 9;
+
+	HBITMAP hSnakeBM = (HBITMAP)LoadImage(App::AppInstance(), MAKEINTRESOURCE(IDB_SNAKE_FULL), IMAGE_BITMAP, BlockSize * ImgCnt, BlockSize, 0);
+	HBITMAP hSnakeBMMask = (HBITMAP)LoadImage(App::AppInstance(), MAKEINTRESOURCE(IDB_SNAKE_FULL), IMAGE_BITMAP, BlockSize * ImgCnt, BlockSize, LR_MONOCHROME);
+
+	hImgList = ImageList_Create(BlockSize, BlockSize, ILC_COLOR32 | ILC_MASK, ImgCnt, 0);
+	ImageList_SetBkColor(hImgList, BkColor);
+	ImageList_Add(hImgList, hSnakeBM, hSnakeBMMask);
+
+	DeleteObject(hSnakeBM);
+	DeleteObject(hSnakeBMMask);
 }
-Snake::~Snake() { DeleteObject(hBitMap); }
+Snake::~Snake() { ImageList_Destroy(hImgList); }
 inline Snake::Direction Snake::GetDirection() const { return dir; }
 inline void Snake::SetDirection(Direction d) { dir = d; }
 inline POINT Snake::GetHead() const { return body[headInd]; }
 inline const std::vector<POINT>& Snake::Body() const { return body; }
 inline uint32_t Snake::BodySize() const { return body.size(); }
 inline void Snake::Eat() { foodEaten = true; }
+inline void Snake::DrawBlock(HDC hdc, POINT p, uint32_t indent, int imgInd) const
+{
+	ImageList_Draw(hImgList, imgInd, hdc, p.x * BlockSize, p.y * BlockSize, ILD_NORMAL);
+}
+void Snake::Reset(uint32_t fieldWidth, uint32_t fieldHeight)
+{
+	body.clear();
+	POINT p = { (LONG)fieldWidth / 2, (LONG)fieldHeight / 2 + 2 };
+	for(int i = 0; i < 4; ++i, --p.y)
+		body.emplace_back(p);
+
+	headInd = body.size() - 1;
+	dir = Direction::UP;
+	foodEaten = false;
+}
 bool Snake::Move(uint32_t fieldWidth, uint32_t fieldHeight)
 {
 	POINT nextHead = body[headInd];
@@ -280,15 +309,17 @@ bool Snake::Move(uint32_t fieldWidth, uint32_t fieldHeight)
 	}
 	return true;
 }
+Snake::Direction Snake::GetDirection(POINT p1, POINT p2) const
+{
+	if(p1.x == p2.x)
+		return p1.y < p2.y ? Direction::UP : Direction::DOWN;
+	else
+		return p1.x < p2.x ? Direction::LEFT : Direction::RIGHT;
+}
 bool Snake::IsValidDirection(Direction testDir) const
 {
-	Direction invalidDir;
 	POINT prevHead = body[headInd == 0 ? body.size() - 1 : headInd - 1];
-	if(body[headInd].x == prevHead.x)
-		invalidDir = body[headInd].y < prevHead.y ? Direction::DOWN : Direction::UP;
-	else
-		invalidDir = body[headInd].x < prevHead.x ? Direction::RIGHT : Direction::LEFT;
-	return testDir != invalidDir;
+	return (GetDirection(prevHead, body[headInd]) != testDir);
 }
 bool Snake::IsBody(POINT testPoint) const
 {
@@ -299,16 +330,16 @@ bool Snake::IsBody(POINT testPoint) const
 }
 void Snake::Draw(HDC hdc, uint32_t indent) const
 {
-	HDC dc = CreateCompatibleDC(hdc);
-	HBITMAP old = (HBITMAP)SelectObject(dc, hBitMap);
+	uint32_t tailInd = (headInd + 1) % body.size();
 
-	for(auto& p : body)
+	for(uint32_t i = 0; i < body.size(); ++i)
 	{
-		StretchBlt(hdc, p.x * BlockSize, p.y * BlockSize + indent, BlockSize, BlockSize, dc, 0, 0, 32, 32, SRCCOPY);
+		if(i != headInd && i != tailInd)
+			DrawBlock(hdc, body[i], indent, 8);
 	}
-
-	SelectObject(dc, old);
-	DeleteDC(dc);
+	Direction tailDir = GetDirection(body[(tailInd + 1) % body.size()], body[tailInd]);
+	DrawBlock(hdc, body[headInd], indent, (int)dir);
+	DrawBlock(hdc, body[tailInd], indent, (int)tailDir + 4);
 }
 
 // Food class methods ------------------------------------------------------------------------------------------------
@@ -325,7 +356,7 @@ void Food::Draw(HDC hdc, uint32_t indent) const
 	HDC dc = CreateCompatibleDC(hdc);
 	HBITMAP old = (HBITMAP)SelectObject(dc, hBitMap);
 
-	StretchBlt(hdc, pos.x * BlockSize, pos.y * BlockSize + indent, BlockSize, BlockSize, dc, 0, 0, 32, 32, SRCCOPY);
+	TransparentBlt(hdc, pos.x * BlockSize, pos.y * BlockSize, BlockSize, BlockSize, dc, 0, 0, 32, 32, RGB(255, 255, 255));
 
 	SelectObject(dc, old);
 	DeleteDC(dc);
@@ -349,7 +380,7 @@ LRESULT CALLBACK App::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			RECT rc;
 			GetWindowRect(toolBar.hToolBar, &rc);
 			vertIndent = rc.bottom - rc.top - 1;
-			InitNewGame();
+			NewGame();
 			break;
 		}
 		case WM_CLOSE:
@@ -369,6 +400,10 @@ App::App(HINSTANCE hInstance, int showCmd) : vertIndent(0), width(10), height(10
 	pApp = this;
 	hInst = hInstance;
 
+	snake = std::make_unique<Snake>();
+	food = std::make_unique<Food>();
+	timer = std::make_unique<Timer>();
+
 	INITCOMMONCONTROLSEX iccex = { sizeof(INITCOMMONCONTROLSEX), ICC_BAR_CLASSES };
 	InitCommonControlsEx(&iccex);
 
@@ -385,6 +420,12 @@ App::~App()
 inline App* App::GetApp() {	return App::pApp; }
 inline HINSTANCE App::AppInstance() { return hInst; }
 inline int App::KeyPressed(int vKey) const { return 0x8000 & GetAsyncKeyState(vKey); }
+inline void App::OutScore() const
+{
+	TCHAR buf[16] = { 0 };
+	_stprintf_s(buf, _T("SCORE: %d"), score);
+	SetWindowText(toolBar.hStaticScore, buf);
+}
 inline void App::EndGame() { running = false; }
 inline void App::Pause()
 {
@@ -393,72 +434,6 @@ inline void App::Pause()
 		SendMessage(toolBar.hToolBar, TB_CHANGEBITMAP, (WPARAM)ID_PAUSE_BTN, (LPARAM)(paused ? toolBar.PauseImg : toolBar.UnpauseImg));
 		paused = !paused;
 	}
-}
-inline void App::NewGame()
-{
-	InitNewGame();
-	RedrawWindow(hMainWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE);
-}
-inline void App::OutScore() const
-{
-	TCHAR buf[16] = { 0 };
-	_stprintf_s(buf, _T("SCORE: %d"), score);
-	SetWindowText(toolBar.hStaticScore, buf);
-}
-
-void App::Options()
-{
-	OptDlgParam param(width, height);
-	if(DialogBoxParam(hInst, MAKEINTRESOURCE(IDD_OPTIONS_DIALOG), hMainWnd, OptionsDialogProc, (LPARAM)&param))
-	{
-		if(std::get<0>(param) != width || std::get<1>(param) != height)
-		{
-			ResizeGameArea(std::get<0>(param), std::get<1>(param));
-			NewGame();
-		}
-	}
-}
-int App::Run()
-{
-	MSG msg = { 0 };
-	timer->Reset();
-	try
-	{
-		while(msg.message != WM_QUIT)
-		{
-			if(PeekMessage(&msg, 0, 0, 0, PM_REMOVE))
-			{
-				TranslateMessage(&msg);
-				DispatchMessage(&msg);
-			}
-
-			timer->Tick();
-			OnKeyboardInput();
-			if(timeStep < timer->Elapsed())
-			{
-				if(running && !paused)
-					Update();
-				timer->Reset();
-			}
-		}
-	}
-	catch(Error err)
-	{
-		const TCHAR* errMsg = nullptr;
-		switch(err)
-		{
-			case Error::ClassRegErr: errMsg = _T("Window class registration failed."); break;
-			case Error::CreateWndErr: errMsg = _T("Window creation failed."); break;
-			case Error::AlreadyExistErr: errMsg = _T("App class object already exists."); break;
-			default: errMsg = _T("WTF?"); break;
-		}
-		MessageBox(0, errMsg, _T("Error"), MB_OK);
-	}
-	catch(std::bad_alloc&)
-	{
-		MessageBox(0, _T("Not enough memory."), _T("Error"), MB_OK);
-	}
-	return (int)msg.wParam;
 }
 ATOM App::RegisterWindowClass()
 {
@@ -472,6 +447,30 @@ ATOM App::RegisterWindowClass()
 
 	return RegisterClassEx(&wcex);
 }
+void App::NewGame()
+{
+	running = true;
+	paused = true;
+	score = 0;
+	snake->Reset(width, height);
+	timer->Reset();
+	SpawnFood();
+	SendMessage(toolBar.hToolBar, TB_CHANGEBITMAP, ID_PAUSE_BTN, (LPARAM)toolBar.UnpauseImg);
+	OutScore();
+	RedrawWindow(hMainWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE);
+}
+void App::Options()
+{
+	OptDlgParam param(width, height);
+	if(DialogBoxParam(hInst, MAKEINTRESOURCE(IDD_OPTIONS_DIALOG), hMainWnd, OptionsDialogProc, (LPARAM)&param))
+	{
+		if(std::get<0>(param) != width || std::get<1>(param) != height)
+		{
+			ResizeGameArea(std::get<0>(param), std::get<1>(param));
+			NewGame();
+		}
+	}
+}
 void App::CreateMainWindow(int showCmd)
 {
 	hMainWnd = CreateWindowEx(0, _T("SnakeMainWndClass"), _T("Snake game"), WS_OVERLAPPEDWINDOW, 
@@ -483,17 +482,6 @@ void App::CreateMainWindow(int showCmd)
 	ResizeGameArea(width, height);
 	ShowWindow(hMainWnd, showCmd);
 	UpdateWindow(hMainWnd);
-}
-void App::InitNewGame()
-{
-	running = true;
-	paused = true;
-	snake = std::make_unique<Snake>(width, height);
-	food = std::make_unique<Food>();
-	timer = std::make_unique<Timer>();
-	SpawnFood();
-
-	SendMessage(toolBar.hToolBar, TB_CHANGEBITMAP, ID_PAUSE_BTN, (LPARAM)toolBar.UnpauseImg);
 }
 void App::ResizeGameArea(uint32_t w, uint32_t h)
 {
@@ -574,9 +562,30 @@ void App::OnPaint()
 {
 	PAINTSTRUCT ps;
 	HDC hdc = BeginPaint(hMainWnd, &ps);
+	HDC hMemDC = CreateCompatibleDC(hdc);
 
-	snake->Draw(hdc, vertIndent);
-	food->Draw(hdc, vertIndent);
+	uint32_t pw = width * BlockSize, ph = height * BlockSize;
+
+	HBITMAP hBitMap = CreateCompatibleBitmap(hdc, pw, ph);
+	hBitMap = (HBITMAP)SelectObject(hMemDC, hBitMap);
+
+	//Fill bitmap with BkColor color
+	{
+		HBRUSH hBr = CreateSolidBrush(BkColor);
+		RECT rc = { 0, 0, (LONG)pw, (LONG)ph };
+		FillRect(hMemDC, &rc, hBr);
+		DeleteObject(hBr);
+	}
+
+	snake->Draw(hMemDC, vertIndent);
+	if(running)
+		food->Draw(hMemDC, vertIndent);
+
+	// Copy bitmap to device
+	BitBlt(hdc, 0, vertIndent, pw, ph, hMemDC, 0, 0, SRCCOPY);
+
+	DeleteObject(SelectObject(hMemDC, hBitMap));
+	DeleteDC(hMemDC);
 
 	EndPaint(hMainWnd, &ps);
 }
@@ -603,21 +612,65 @@ void App::Update()
 		EndGame();
 		return;
 	}
-	if(snake->BodySize() == width * height)
-	{
-		MessageBox(hMainWnd, _T("You reached maximum snake length!"), _T("Message"), MB_OK);
-		EndGame();
-		return;
-	}
 	if(snake->GetHead() == food->GetPos())
 	{
 		snake->Eat();
-		SpawnFood();
-
 		++score;
 		OutScore();		
+		if(snake->BodySize() == width * height)
+		{
+			EndGame();
+			RedrawWindow(hMainWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE);
+			MessageBox(hMainWnd, _T("You reached maximum snake length!"), _T("Message"), MB_OK);
+			return;
+		}
+		else
+			SpawnFood();
+
 	}
 	RedrawWindow(hMainWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE);
+}
+int App::Run()
+{
+	MSG msg = { 0 };
+	timer->Reset();
+	try
+	{
+		while(msg.message != WM_QUIT)
+		{
+			if(PeekMessage(&msg, 0, 0, 0, PM_REMOVE))
+			{
+				TranslateMessage(&msg);
+				DispatchMessage(&msg);
+			}
+
+			timer->Tick();
+			OnKeyboardInput();
+			if(timeStep < timer->Elapsed())
+			{
+				if(running && !paused)
+					Update();
+				timer->Reset();
+			}
+		}
+	}
+	catch(Error err)
+	{
+		const TCHAR* errMsg = nullptr;
+		switch(err)
+		{
+			case Error::ClassRegErr: errMsg = _T("Window class registration failed."); break;
+			case Error::CreateWndErr: errMsg = _T("Window creation failed."); break;
+			case Error::AlreadyExistErr: errMsg = _T("App class object already exists."); break;
+			default: errMsg = _T("WTF?"); break;
+		}
+		MessageBox(0, errMsg, _T("Error"), MB_OK);
+	}
+	catch(std::bad_alloc&)
+	{
+		MessageBox(0, _T("Not enough memory."), _T("Error"), MB_OK);
+	}
+	return (int)msg.wParam;
 }
 
 INT_PTR CALLBACK OptionsDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)

@@ -45,5 +45,8 @@
     <Image Include="toolbar_imgs.bmp">
       <Filter>Resource Files</Filter>
     </Image>
+    <Image Include="snake_imgs.bmp">
+      <Filter>Resource Files</Filter>
+    </Image>
   </ItemGroup>
 </Project>
