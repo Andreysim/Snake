@@ -9,20 +9,23 @@
 #endif
 
 #define NOMINMAX
+#define _SCL_SECURE_NO_WARNINGS
 
+#include <Windows.h>
+#include <CommCtrl.h>
+#include <tchar.h>
 #include <vector>
-#include <tuple>
 #include <limits>
 #include <random>
 #include <ctime>
 #include <memory>
 #include <algorithm>
-#include <tchar.h>
-#include <Windows.h>
-#include <CommCtrl.h>
+#include <numeric>
 #include "resource.h"
 
 typedef std::tuple<uint32_t, uint32_t> OptDlgParam;
+typedef std::tuple<uint32_t, uint32_t, std::unique_ptr<char[]>> ScoresData;
+typedef std::tuple<ScoresData*, uint32_t, uint32_t, uint32_t> RecordsDlgParam;
 
 enum class Error 
 { 
@@ -31,18 +34,44 @@ enum class Error
     AlreadyExistErr,
 };
 
-constexpr int nButtons = 3;
-constexpr int BtnSize = 24;
-constexpr uint32_t BlockSize = 24;
-constexpr uint32_t MinWidth = 8;
-constexpr uint32_t MinHeight = 8;
-constexpr uint32_t MaxWidth = 32;
-constexpr uint32_t MaxHeight = 32;
-constexpr COLORREF BkColor = RGB(192, 192, 192);
+class HandleManager
+{
+public:
+    HandleManager(HANDLE handle = nullptr) : hHandle(handle == INVALID_HANDLE_VALUE ? nullptr : handle) {}
+    HandleManager(const HandleManager&) = delete;
+    HandleManager& operator = (const HandleManager&) = delete;
+    HandleManager(HandleManager&&) = default;
+    HandleManager& operator = (HandleManager&&) = default;
+    ~HandleManager() { reset(); }
 
+    HANDLE get() const { return hHandle; }
+    HANDLE release()
+    {
+        HANDLE ret = hHandle;
+        hHandle = nullptr;
+        return ret;
+    }
+    void reset(HANDLE hNewHandle = nullptr)
+    {
+        if(hHandle)
+            CloseHandle(hHandle);
+        hHandle = hNewHandle;
+    }
+    bool operator !() const { return hHandle == nullptr; }
+    explicit operator bool() const { return hHandle != nullptr; }
+private:
+    HANDLE hHandle;
+};
 
-inline bool operator == (const POINT& p1, const POINT& p2) { return p1.x == p2.x && p1.y == p2.y; }
-inline bool operator != (const POINT& p1, const POINT& p2) { return !(p1 == p2); }
+struct AppGuard
+{
+    AppGuard(LPCTSTR mutexName) : mutex(CreateMutex(nullptr, FALSE, mutexName)) 
+    {
+        if(GetLastError() == ERROR_ALREADY_EXISTS)
+            mutex.reset();
+    }
+    HandleManager mutex;
+};
 
 template<typename T>
 class RandGen
@@ -73,13 +102,7 @@ private:
 class Snake
 {
 public:
-    enum Direction 
-    {
-        UP = 0, 
-        DOWN = 1, 
-        RIGHT = 2,
-        LEFT = 3, 
-    };
+    enum Direction { UP, DOWN, RIGHT, LEFT };
 
     Snake();
     ~Snake();
@@ -93,18 +116,19 @@ public:
     bool Move(uint32_t fieldWidth, uint32_t fieldHeight);
     bool IsValidDirection(Direction dir) const;
     bool IsBody(POINT testPoint) const;
-    void Draw(HDC hdc, uint32_t indent) const;
+    void Draw(HDC hdc) const;
     const std::vector<POINT>& Body() const;
 
 private:
-    void DrawBlock(HDC hdc, POINT p, uint32_t indent, int imgInd) const;
+    void DrawBlock(HDC hdc, POINT p, int imgInd) const;
     Direction GetDirection(POINT p1, POINT p2) const;
 
+private:
     std::vector<POINT> body;
-    uint32_t headInd;
-    Direction dir;
-    HIMAGELIST hImgList;
-    bool foodEaten;
+    HIMAGELIST hImgList = nullptr;
+    uint32_t headInd = (uint32_t)-1;
+    Direction dir = Direction::UP;
+    bool foodEaten = false;
 };
 
 class Food
@@ -114,90 +138,151 @@ public:
     ~Food();
     POINT GetPos() const;
     void SetPos(POINT p);
-    void Draw(HDC hdc, uint32_t indent) const;
+    void Draw(HDC hdc) const;
 
 private:
-    HBITMAP hBitMap;
+    HBITMAP hBitMap = nullptr;
     POINT pos;
 };
 
 struct ToolBar
 {
     enum ImgInd { OptImg, NewGameImg, UnpauseImg, PauseImg, CountImg };
-    ToolBar();
+    ToolBar() = default;
     ToolBar(DWORD style, int x, int y, int w, int h, HWND parent, UINT id, HINSTANCE hInst, UINT imgId);
     void Destroy();
 
-    HWND hToolBar;
-    HWND hStaticScore;
-    HIMAGELIST hImgList;
+    HWND hToolBar = nullptr;
+    HWND hStaticScore = nullptr;
+    HIMAGELIST hImgList = nullptr;
 };
 
 class App
 {
+private:
+    static const uint32_t MaxRecordsCount = 10;
+    struct ScoresData
+    {
+        struct Record
+        {
+            static const uint32_t MaxRecordStrLen = 40;
+            uint32_t width = 0;
+            uint32_t height = 0;
+            uint32_t score = 0;
+            uint32_t nameLength = 0;
+            uint32_t recordLength = 0;
+            std::unique_ptr<TCHAR[]> name;
+            std::unique_ptr<TCHAR[]> recordStr;
+            void* ReadRecord(void* pMem);
+            void* WriteRecord(void* pMem);
+            void  BuildRecordStr(bool bEmpty);
+        };
+        typedef std::unique_ptr<Record> RecordPtr;
+        uint32_t nRecords;
+        RecordPtr records[MaxRecordsCount];
+    };
+
 public:
     static App* GetApp();
     static HINSTANCE AppInstance();
 
-    App(HINSTANCE hInstance, int showCmd);
-
+    App(HINSTANCE hInstance, LPTSTR lpCmdLine, int showCmd);
     App(const App&) = delete;
     App(App&&) = default;
-
     App& operator = (const App&) = delete;
     App& operator = (App&&) = default;
-
     ~App();
+
     int Run();
 
 private:
     static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     static INT_PTR CALLBACK OptionsDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    static INT_PTR CALLBACK ScoresDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    static INT_PTR CALLBACK PlayerNameInputDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+    BOOL SaveScoresData();
+    BOOL CreateScoresSaverExe();
+    BOOL LaunchScoresSaverExe();
+    BOOL SendDataToScoresSaver(HandleManager& pipe);
+    BOOL DeleteScoresSaverExe(LPCTSTR cmdLine);
+
     LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     ATOM RegisterWindowClass();
     void CreateMainWindow(int showCmd);
-    void EndGame();
+    bool LoadScoresData();
     void ResizeGameArea(uint32_t w, uint32_t h);
+
     int KeyPressed(int vKey) const;
     void OnKeyboardInput();
+    void OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT code);
     void OnNotify(HWND hwnd, int id, LPNMHDR phdr);
     void OnKeyDown(HWND hwnd, UINT vk, BOOL fDown, int cRepeat, UINT flags);
     void OnPaint();
     void Options();
+
     void NewGame();
     void Pause();
-    void SpawnFood();
     void Update();
+    void SpawnFood();
+
+    void EndGame();
     void OutScore() const;
+    void Records(bool bPushRecord);
 
 private:
     static App* pApp;
     static HINSTANCE hInst;
 
-    HWND hMainWnd;
+    HWND hMainWnd = nullptr;
     ToolBar toolBar;
 
-    uint32_t vertIndent;
-    uint32_t width;
-    uint32_t height;
-    uint32_t score;
+    uint32_t vertIndent = 0;
+    uint32_t width = 10;
+    uint32_t height = 10;
+    uint32_t score = 0;
 
     std::unique_ptr<Snake> snake;
     std::unique_ptr<Food> food;
     std::unique_ptr<Timer> timer;
+    std::unique_ptr<ScoresData> scoresData;
 
-    bool running;
-    bool paused;
-    double timeStep;
+    bool running = false;
+    bool paused = false;
+    bool scoresChanged = false;
+
+    double timeStep = 0.3;
 };
+
 App* App::pApp = nullptr;
 HINSTANCE App::hInst = nullptr;
 
+constexpr LPCTSTR PipeName = _T("\\\\.\\pipe\\SnakeGamePipe");
+constexpr LPCTSTR SnakeGameMutexName = _T("SnakeGameGuardMutex");
+constexpr LPCTSTR ScoresSaverExeName = _T("_SnakeGameEmbeddedExecutable.exe");
+
+constexpr DWORD MainWindowStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+constexpr int nButtons = 3;
+constexpr int BtnSize = 24;
+constexpr uint32_t BlockSize = 24;
+constexpr uint32_t MinWidth = 8;
+constexpr uint32_t MinHeight = 8;
+constexpr uint32_t MaxWidth = 32;
+constexpr uint32_t MaxHeight = 32;
+constexpr COLORREF BkColor = RGB(192, 192, 192);
+
+AppGuard appGuard(SnakeGameMutexName);
+
 //########################################################################################################################
 
-int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE, LPTSTR, int nShowCmd)
+inline bool operator == (const POINT& p1, const POINT& p2) { return p1.x == p2.x && p1.y == p2.y; }
+inline bool operator != (const POINT& p1, const POINT& p2) { return !(p1 == p2); }
+
+int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE, LPTSTR lpCmdLine, int nShowCmd)
 {
-    App app(hInstance, nShowCmd);
+    if(!appGuard.mutex)
+        return 0;
+    App app(hInstance, lpCmdLine, nShowCmd);
     return app.Run();
 }
 
@@ -224,7 +309,6 @@ inline double Timer::Elapsed() const
 }
 
 // Toolbar struct methods ------------------------------------------------------------------------------------------------
-ToolBar::ToolBar() : hToolBar(nullptr) {}
 ToolBar::ToolBar(DWORD style, int x, int y, int w, int h, HWND parent, UINT id, HINSTANCE hInst, UINT imgId)
 {
     hToolBar = CreateWindowEx(0, TOOLBARCLASSNAME, nullptr, style, x, y, w, h, parent, (HMENU)id, hInst, nullptr);
@@ -267,7 +351,7 @@ inline void ToolBar::Destroy()
 }
 
 // Snake class methods ------------------------------------------------------------------------------------------------
-Snake::Snake() : headInd(~0), dir(Direction::UP), foodEaten(false)
+Snake::Snake()
 {
     constexpr int ImgCnt = 9;
 
@@ -288,7 +372,7 @@ inline POINT Snake::GetHead() const { return body[headInd]; }
 inline const std::vector<POINT>& Snake::Body() const { return body; }
 inline uint32_t Snake::BodySize() const { return body.size(); }
 inline void Snake::Eat() { foodEaten = true; }
-inline void Snake::DrawBlock(HDC hdc, POINT p, uint32_t indent, int imgInd) const
+inline void Snake::DrawBlock(HDC hdc, POINT p, int imgInd) const
 {
     ImageList_Draw(hImgList, imgInd, hdc, p.x * BlockSize, p.y * BlockSize, ILD_NORMAL);
 }
@@ -351,18 +435,18 @@ bool Snake::IsBody(POINT testPoint) const
             return true;
     return false;
 }
-void Snake::Draw(HDC hdc, uint32_t indent) const
+void Snake::Draw(HDC hdc) const
 {
     uint32_t tailInd = (headInd + 1) % body.size();
 
     for(uint32_t i = 0; i < body.size(); ++i)
     {
         if(i != headInd && i != tailInd)
-            DrawBlock(hdc, body[i], indent, 8);
+            DrawBlock(hdc, body[i], 8);
     }
     Direction tailDir = GetDirection(body[(tailInd + 1) % body.size()], body[tailInd]);
-    DrawBlock(hdc, body[headInd], indent, (int)dir);
-    DrawBlock(hdc, body[tailInd], indent, (int)tailDir + 4);
+    DrawBlock(hdc, body[headInd], (int)dir);
+    DrawBlock(hdc, body[tailInd], (int)tailDir + 4);
 }
 
 // Food class methods ------------------------------------------------------------------------------------------------
@@ -374,7 +458,7 @@ Food::Food()
 Food::~Food() { DeleteObject(hBitMap); }
 inline POINT Food::GetPos() const { return pos; }
 inline void Food::SetPos(POINT p) { pos = p; }
-void Food::Draw(HDC hdc, uint32_t indent) const
+void Food::Draw(HDC hdc) const
 {
     HDC dc = CreateCompatibleDC(hdc);
     HBITMAP old = (HBITMAP)SelectObject(dc, hBitMap);
@@ -397,12 +481,15 @@ LRESULT CALLBACK App::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_PAINT: OnPaint(); break;
         case WM_KEYDOWN: OnKeyDown(hwnd, (UINT)wParam, TRUE, (int)LOWORD(lParam), (UINT)HIWORD(lParam)); break;
         case WM_NOTIFY: OnNotify(hwnd, (int)wParam, (LPNMHDR)lParam); break;
+        case WM_COMMAND: OnCommand(hwnd, LOWORD(wParam), (HWND)lParam, (UINT)HIWORD(wParam)); break;
         case WM_CREATE:
         {
             toolBar = ToolBar(WS_CHILD | WS_BORDER | TBSTYLE_TOOLTIPS, 0, 0, width * BlockSize, BtnSize, hwnd, ID_TOOLBAR, hInst, IDB_TOOLBAR);
+            int menuHeight = GetSystemMetrics(SM_CYMENU);
             RECT rc;
             GetWindowRect(toolBar.hToolBar, &rc);
-            vertIndent = rc.bottom - rc.top - 1;
+            vertIndent = menuHeight + rc.bottom - rc.top - 1;
+
             NewGame();
             break;
         }
@@ -417,41 +504,44 @@ LRESULT CALLBACK App::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 }
 INT_PTR CALLBACK App::OptionsDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-    static OptDlgParam* pParam = nullptr;
     switch(msg)
     {
         case WM_INITDIALOG:
         {
-            pParam = (OptDlgParam*)lParam;
-            SetDlgItemInt(hwnd, IDC_WIDTH_EDIT, std::get<0>(*pParam), FALSE);
-            SetDlgItemInt(hwnd, IDC_HEIGHT_EDIT, std::get<1>(*pParam), FALSE);
+            SetDlgItemInt(hwnd, IDC_WIDTH_EDIT, GetApp()->width, FALSE);
+            SetDlgItemInt(hwnd, IDC_HEIGHT_EDIT, GetApp()->height, FALSE);
+            break;
         }
         case WM_COMMAND:
         {
             if(wParam == IDOK)
             {
-                uint32_t val = 0;
-                val = GetDlgItemInt(hwnd, IDC_WIDTH_EDIT, nullptr, FALSE);
-                if(val < MinWidth || val > MaxWidth)
+                uint32_t newWidth = 0, newHeight = 0;
+                newWidth = GetDlgItemInt(hwnd, IDC_WIDTH_EDIT, nullptr, FALSE);
+                if(newWidth < MinWidth || newWidth > MaxWidth)
                 {
                     TCHAR buf[64] = { 0 };
                     _stprintf_s(buf, _T("Width must be in range [%d, %d]"), MinWidth, MaxWidth);
                     MessageBox(hwnd, buf, _T("Error"), MB_OK);
                     break;
                 }
-                std::get<0>(*pParam) = val;
 
-                val = GetDlgItemInt(hwnd, IDC_HEIGHT_EDIT, nullptr, FALSE);
-                if(val < MinHeight || val > MaxHeight)
+                newHeight = GetDlgItemInt(hwnd, IDC_HEIGHT_EDIT, nullptr, FALSE);
+                if(newHeight < MinHeight || newHeight > MaxHeight)
                 {
                     TCHAR buf[64] = { 0 };
                     _stprintf_s(buf, _T("Height must be in range [%d, %d]"), MinHeight, MaxHeight);
                     MessageBox(hwnd, buf, _T("Error"), MB_OK);
                     break;
                 }
-                std::get<1>(*pParam) = val;
-
-                EndDialog(hwnd, 1);
+                if(newWidth != GetApp()->width || newHeight != GetApp()->height)
+                {
+                    GetApp()->width = newWidth;
+                    GetApp()->height = newHeight;
+                    EndDialog(hwnd, 1);
+                }
+                else
+                    EndDialog(hwnd, 0);
                 break;
             }
             else if(wParam == IDCANCEL)
@@ -463,8 +553,139 @@ INT_PTR CALLBACK App::OptionsDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     }
     return TRUE;
 }
-App::App(HINSTANCE hInstance, int showCmd) : vertIndent(0), width(10), height(10), score(0), timeStep(0.3), running(false), paused(false)
+INT_PTR CALLBACK App::ScoresDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    constexpr uint32_t BufferSize = 64;
+    static uint32_t newScore;
+
+    switch(msg)
+    {
+        case WM_INITDIALOG:
+        {
+            newScore = (uint32_t)lParam;
+            if(!newScore)
+                break;
+
+            uint32_t& nRecords = GetApp()->scoresData->nRecords;
+            auto& records = GetApp()->scoresData->records;
+
+            // create new record
+            auto newRecord = std::make_unique<ScoresData::Record>();
+            newRecord->score = newScore;
+            newRecord->width = GetApp()->width;
+            newRecord->height = GetApp()->height;
+            newRecord->nameLength = DialogBoxParam(hInst, MAKEINTRESOURCE(IDD_NAME_INPUT_DIALOG), hwnd, PlayerNameInputDialogProc, (LPARAM)&newRecord->name);
+            newRecord->BuildRecordStr(false);
+
+            // insert new record
+            auto it1 = (nRecords == 0) ? std::begin(records) :
+                std::find_if(std::begin(records), std::begin(records) + nRecords,
+                    [score = newRecord->score](const ScoresData::RecordPtr& rec){ return rec->score <= score; });
+            if(it1 != std::begin(records) + nRecords)
+                std::move_backward(it1, std::begin(records) + (MaxRecordsCount - 1), std::begin(records) + MaxRecordsCount);
+            *it1 = std::move(newRecord);
+
+            if(nRecords < MaxRecordsCount)
+                ++nRecords;                  
+            break;
+        }
+        case WM_PAINT:
+        {         
+            constexpr TCHAR header[] = _T(" N  Name        Field(WxH)  Score\n");
+            constexpr uint32_t headerSize = _countof(header);
+
+            auto& records = GetApp()->scoresData->records;
+            uint32_t recordsTextLen = std::accumulate(std::cbegin(records), std::cend(records), headerSize,
+                [](uint32_t sum, const ScoresData::RecordPtr& rec) {return sum + rec->recordLength; });
+            auto recordsText = std::make_unique<TCHAR[]>(recordsTextLen);
+
+            memcpy(recordsText.get(), header, headerSize * sizeof(TCHAR));
+            std::for_each(std::cbegin(records), std::cend(records),
+                [it = recordsText.get() + headerSize, i = uint32_t(0), end = recordsText.get() + recordsTextLen](const ScoresData::RecordPtr& rec) mutable
+                {
+                    TCHAR buf[16];
+                    _stprintf_s(buf, _T("%2u"), ++i);
+                    memcpy(it, rec->recordStr.get(), rec->recordLength * sizeof(TCHAR));
+                    memcpy(it + 1, buf, 2 * sizeof(TCHAR));
+                    it += rec->recordLength;
+                });
+
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+
+            SetBkColor(hdc, GetSysColor(COLOR_MENU));
+            HFONT hFont = CreateFont(-12, 0, 0, 0, 0, 0, 0, 0, RUSSIAN_CHARSET, 0, 0, 0, FIXED_PITCH | FF_MODERN, _T("Consolas"));
+            hFont = (HFONT)SelectObject(hdc, hFont);
+            RECT rc = { 7, 7, 350, 350 };
+            DrawText(hdc, recordsText.get(), recordsTextLen, &rc, DT_NOPREFIX);
+
+            DeleteObject(SelectObject(hdc, hFont));
+            EndPaint(hwnd, &ps);
+            break;
+        }
+        case WM_COMMAND:
+        {
+            if(wParam == IDOK)
+            {
+                if(newScore)
+                {
+                    GetApp()->scoresChanged = true;
+                    EndDialog(hwnd, 1);
+                }
+                else
+                    EndDialog(hwnd, 0);
+            }
+            break;
+        }
+        default:
+            return FALSE;
+    }
+    return TRUE;
+}
+INT_PTR CALLBACK App::PlayerNameInputDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    static std::unique_ptr<TCHAR[]> *namePtr = nullptr;
+    switch(msg)
+    {
+        case WM_INITDIALOG:
+            namePtr = (std::unique_ptr<TCHAR[]>*)lParam;          
+            PostMessage(hwnd, WM_NEXTDLGCTL, (WPARAM)GetDlgItem(hwnd, IDC_NAME_EDIT), MAKELPARAM(TRUE, 0));
+            break;
+        case WM_COMMAND:
+            if(wParam == IDOK)
+            {
+                TCHAR buf[16];
+                uint32_t nCh = GetDlgItemText(hwnd, IDC_NAME_EDIT, buf, 16);
+                if(nCh == 0)
+                    goto m;
+                TCHAR *itBeg, *itEnd;
+                for(itBeg = buf; *itBeg && !_istgraph(*itBeg); ++itBeg);
+                if(!*itBeg)
+                    goto m;
+                for(itEnd = buf + nCh - 1; itBeg < itEnd && !_istgraph(*itEnd); --itEnd);
+                nCh = ++itEnd - itBeg;
+                *namePtr = std::make_unique<TCHAR[]>(nCh + 1);
+                memcpy(namePtr->get(), itBeg, nCh * sizeof(TCHAR));
+                EndDialog(hwnd, nCh);
+                break;
+m:
+                MessageBox(hwnd, _T("Incorrect name!"), _T("Error"), MB_OK);
+            }
+            break;
+        default:
+            return FALSE;
+    }
+    return TRUE;
+}
+
+App::App(HINSTANCE hInstance, LPTSTR lpCmdLine, int showCmd)
+{
+    if(_tcsstr(lpCmdLine, _T("-d")))
+    {
+        DeleteScoresSaverExe(lpCmdLine);
+        return;
+    }
+
     if(pApp)
         throw Error::AlreadyExistErr;
 
@@ -474,6 +695,8 @@ App::App(HINSTANCE hInstance, int showCmd) : vertIndent(0), width(10), height(10
     snake = std::make_unique<Snake>();
     food = std::make_unique<Food>();
     timer = std::make_unique<Timer>();
+
+    LoadScoresData();
 
     INITCOMMONCONTROLSEX iccex = { sizeof(INITCOMMONCONTROLSEX), ICC_BAR_CLASSES };
     InitCommonControlsEx(&iccex);
@@ -488,16 +711,101 @@ App::~App()
     pApp = nullptr; 
 }
 
-inline App* App::GetApp() {    return App::pApp; }
+BOOL App::CreateScoresSaverExe()
+{
+    HRSRC hRes = FindResource(hInst, MAKEINTRESOURCE(IDR_SCORES_SAVER_EXE), RT_RCDATA);
+    HGLOBAL hGlRes = LoadResource(hInst, hRes);
+    LPVOID pRes = LockResource(hGlRes);
+    DWORD resSize = SizeofResource(hInst, hRes);
+
+    HandleManager hExecFile = CreateFile(ScoresSaverExeName, GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_HIDDEN, nullptr);
+    if(!hExecFile)
+        return FALSE;
+    if(!WriteFile(hExecFile.get(), pRes, resSize, nullptr, nullptr))
+    {
+        DeleteFile(ScoresSaverExeName);
+        return FALSE;
+    }
+    return TRUE;
+}
+BOOL App::DeleteScoresSaverExe(LPCTSTR cmdLine)
+{
+    size_t tmp = 0;
+    if(_stscanf_s(cmdLine, _T(" -d %zu"), &tmp) != 1)
+        return FALSE;
+    HandleManager hSaverProcess((HANDLE)tmp);
+    WaitForSingleObject(hSaverProcess.get(), 1000);
+    return DeleteFile(ScoresSaverExeName);
+}
+BOOL App::LaunchScoresSaverExe()
+{
+    HandleManager hCurrProc = OpenProcess(PROCESS_ALL_ACCESS, TRUE, GetCurrentProcessId());
+    if(!hCurrProc)
+        return FALSE;
+    TCHAR currExeName[MAX_PATH];
+    GetModuleFileName(hInst, currExeName, MAX_PATH);
+
+    auto cmdLine = std::make_unique<TCHAR[]>(2 * MAX_PATH + 32);
+    _stprintf_s(cmdLine.get(), 2 * MAX_PATH + 32, _T("\"%s\" -n \"%s\" -h %zu"), ScoresSaverExeName, currExeName, (size_t)hCurrProc.get());
+
+    STARTUPINFO si = { sizeof(STARTUPINFO) };
+    PROCESS_INFORMATION pi = {};
+    BOOL ret = CreateProcess(nullptr, cmdLine.get(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi);
+    if(ret)
+    {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+    return ret;
+}
+BOOL App::SaveScoresData()
+{ 
+    HandleManager pipe = CreateNamedPipe(PipeName, PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE | PIPE_WAIT, 2, 4096, 4096, 0, nullptr);
+    if( !(pipe && CreateScoresSaverExe() && LaunchScoresSaverExe() && SendDataToScoresSaver(pipe)) )
+        return FALSE;
+    return TRUE;
+}
+BOOL App::SendDataToScoresSaver(HandleManager& pipe)
+{
+    uint32_t dataSize = std::accumulate(std::cbegin(scoresData->records), std::cbegin(scoresData->records) + scoresData->nRecords, uint32_t(sizeof(uint32_t)),
+        [](uint32_t sum, const ScoresData::RecordPtr& rec) { return sum + 4 * sizeof(uint32_t) + rec->nameLength * sizeof(TCHAR); });
+
+    auto data = std::make_unique<char[]>(dataSize + sizeof(uint32_t));
+    uint32_t *it = (uint32_t*)data.get();
+    *it++ = dataSize;
+    *it++ = scoresData->nRecords;
+    std::for_each(std::cbegin(scoresData->records), std::cbegin(scoresData->records) + scoresData->nRecords,
+        [&it](const ScoresData::RecordPtr& rec)
+        {
+            it = (uint32_t*)rec->WriteRecord(it);
+        });
+
+    ConnectNamedPipe(pipe.get(), nullptr);
+    return WriteFile(pipe.get(), data.get(), dataSize + sizeof(uint32_t), nullptr, nullptr);
+}
+
 inline HINSTANCE App::AppInstance() { return hInst; }
-inline int App::KeyPressed(int vKey) const { return 0x8000 & GetAsyncKeyState(vKey); }
+inline void App::EndGame()
+{
+    running = false; 
+    Records(true);
+}
+inline App* App::GetApp() { return App::pApp; }
+inline int  App::KeyPressed(int vKey) const { return 0x8000 & GetAsyncKeyState(vKey); }
+inline void App::Options()
+{
+    if(DialogBox(hInst, MAKEINTRESOURCE(IDD_OPTIONS_DIALOG), hMainWnd, OptionsDialogProc))
+    {
+        ResizeGameArea(width, height);
+        NewGame();
+    }
+}
 inline void App::OutScore() const
 {
     TCHAR buf[16] = { 0 };
     _stprintf_s(buf, _T("SCORE: %d"), score);
     SetWindowText(toolBar.hStaticScore, buf);
 }
-inline void App::EndGame() { running = false; }
 inline void App::Pause()
 {
     if(running)
@@ -506,17 +814,47 @@ inline void App::Pause()
         paused = !paused;
     }
 }
-ATOM App::RegisterWindowClass()
+inline void App::Records(bool bPushRecord)
 {
-    WNDCLASSEX wcex = { sizeof(WNDCLASSEX) };
-    wcex.lpfnWndProc = App::MainProc;
-    wcex.hInstance = hInst;
-    wcex.hIcon = LoadIcon(hInst, IDI_APPLICATION);
-    wcex.hCursor = LoadCursor(hInst, IDC_ARROW);
-    wcex.hbrBackground = (HBRUSH)COLOR_BACKGROUND;
-    wcex.lpszClassName = _T("SnakeMainWndClass");
+    if(bPushRecord && (score == 0 || scoresData->nRecords == MaxRecordsCount && score < scoresData->records[MaxRecordsCount - 1]->score))
+        return;
+    DialogBoxParam(hInst, MAKEINTRESOURCE(IDD_SCORE_TABLE_DIALOG), hMainWnd, ScoresDialogProc, (LPARAM)(bPushRecord ? score : 0));
+}
 
-    return RegisterClassEx(&wcex);
+bool App::LoadScoresData()
+{
+    HRSRC hScoreRes = FindResource(hInst, MAKEINTRESOURCE(IDR_SCOREDATA), RT_RCDATA);
+    HGLOBAL hLoadScoreRes = LoadResource(hInst, hScoreRes);
+    uint32_t *scoresResAddr = (uint32_t*)LockResource(hLoadScoreRes);
+
+    if(!scoresResAddr)
+        return false;
+
+    scoresData = std::make_unique<ScoresData>();
+    scoresData->nRecords = *scoresResAddr++;
+
+    for(uint32_t i = 0; i < MaxRecordsCount; ++i)
+    {
+        auto& record = scoresData->records[i];
+        record = std::make_unique<ScoresData::Record>();
+        if(i < scoresData->nRecords)
+            scoresResAddr = (uint32_t*)record->ReadRecord(scoresResAddr);
+        else
+            record->ReadRecord(nullptr);
+    }
+    return true;
+}
+void App::CreateMainWindow(int showCmd)
+{
+    hMainWnd = CreateWindowEx(0, _T("SnakeMainWndClass"), _T("Snake game"), MainWindowStyle, 
+        CW_USEDEFAULT, CW_USEDEFAULT, 0, 0,    0, 0, hInst, nullptr);
+
+    if(!hMainWnd)
+        throw Error::CreateWndErr;
+
+    ResizeGameArea(width, height);
+    ShowWindow(hMainWnd, showCmd);
+    UpdateWindow(hMainWnd);
 }
 void App::NewGame()
 {
@@ -529,42 +867,6 @@ void App::NewGame()
     SendMessage(toolBar.hToolBar, TB_CHANGEBITMAP, ID_PAUSE_BTN, (LPARAM)toolBar.UnpauseImg);
     OutScore();
     RedrawWindow(hMainWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE);
-}
-void App::Options()
-{
-    OptDlgParam param(width, height);
-    if(DialogBoxParam(hInst, MAKEINTRESOURCE(IDD_OPTIONS_DIALOG), hMainWnd, OptionsDialogProc, (LPARAM)&param))
-    {
-        if(std::get<0>(param) != width || std::get<1>(param) != height)
-        {
-            ResizeGameArea(std::get<0>(param), std::get<1>(param));
-            NewGame();
-        }
-    }
-}
-void App::CreateMainWindow(int showCmd)
-{
-    hMainWnd = CreateWindowEx(0, _T("SnakeMainWndClass"), _T("Snake game"), WS_OVERLAPPEDWINDOW, 
-        CW_USEDEFAULT, CW_USEDEFAULT, 0, 0,    0, 0, hInst, nullptr);
-
-    if(!hMainWnd)
-        throw Error::CreateWndErr;
-
-    ResizeGameArea(width, height);
-    ShowWindow(hMainWnd, showCmd);
-    UpdateWindow(hMainWnd);
-}
-void App::ResizeGameArea(uint32_t w, uint32_t h)
-{
-    width = std::max(MinWidth, std::min(w, MaxWidth));
-    height = std::max(MinHeight, std::min(h, MaxHeight));
-    RECT wndRect, adjRect = { 0, 0, (LONG)(width * BlockSize), (LONG)(height * BlockSize + vertIndent) };
-    AdjustWindowRectEx(&adjRect, WS_OVERLAPPEDWINDOW, FALSE, 0);
-    GetWindowRect(hMainWnd, &wndRect);
-    wndRect.right = adjRect.right - adjRect.left;
-    wndRect.bottom = adjRect.bottom - adjRect.top;
-    MoveWindow(hMainWnd, wndRect.left, wndRect.top, wndRect.right, wndRect.bottom, TRUE);
-    SendMessage(toolBar.hToolBar, TB_AUTOSIZE, 0, 0);
 }
 void App::OnKeyboardInput()
 {
@@ -592,6 +894,18 @@ void App::OnKeyDown(HWND hwnd, UINT vk, BOOL fDown, int cRepeat, UINT flags)
         Options();
     else if(vk == 'N')
         NewGame();
+}
+void App::OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT code)
+{
+    if(code == 0)
+    {
+        switch(id)
+        {
+            case ID_GAME_OPTIONS: Options(); break;
+            case ID_GAME_CHAMPIONS: Records(false); break;
+            case ID_GAME_EXIT: PostMessage(hwnd, WM_CLOSE, 0, 0);
+        }
+    }
 }
 void App::OnNotify(HWND hwnd, int id, LPNMHDR phdr)
 {
@@ -648,17 +962,88 @@ void App::OnPaint()
         DeleteObject(hBr);
     }
 
-    snake->Draw(hMemDC, vertIndent);
+    snake->Draw(hMemDC);
     if(running)
-        food->Draw(hMemDC, vertIndent);
+        food->Draw(hMemDC);
 
     // Copy bitmap to device
-    BitBlt(hdc, 0, vertIndent, pw, ph, hMemDC, 0, 0, SRCCOPY);
+    BitBlt(hdc, 0, vertIndent - GetSystemMetrics(SM_CYMENU), pw, ph, hMemDC, 0, 0, SRCCOPY);
 
     DeleteObject(SelectObject(hMemDC, hBitMap));
     DeleteDC(hMemDC);
 
     EndPaint(hMainWnd, &ps);
+}
+ATOM App::RegisterWindowClass()
+{
+    WNDCLASSEX wcex = { sizeof(WNDCLASSEX) };
+    wcex.lpfnWndProc = App::MainProc;
+    wcex.hInstance = hInst;
+    wcex.hIcon = LoadIcon(hInst, IDI_APPLICATION);
+    wcex.hCursor = LoadCursor(hInst, IDC_ARROW);
+    wcex.hbrBackground = (HBRUSH)COLOR_BACKGROUND;
+    wcex.lpszMenuName = MAKEINTRESOURCE(IDR_GAME_MENU);
+    wcex.lpszClassName = _T("SnakeMainWndClass");
+
+    return RegisterClassEx(&wcex);
+}
+void App::ResizeGameArea(uint32_t w, uint32_t h)
+{
+    width = std::max(MinWidth, std::min(w, MaxWidth));
+    height = std::max(MinHeight, std::min(h, MaxHeight));
+    RECT wndRect, adjRect = { 0, 0, (LONG)(width * BlockSize), (LONG)(height * BlockSize + vertIndent) };
+    AdjustWindowRectEx(&adjRect, MainWindowStyle, FALSE, 0);
+    GetWindowRect(hMainWnd, &wndRect);
+    wndRect.right = adjRect.right - adjRect.left;
+    wndRect.bottom = adjRect.bottom - adjRect.top;
+    MoveWindow(hMainWnd, wndRect.left, wndRect.top, wndRect.right, wndRect.bottom, TRUE);
+    SendMessage(toolBar.hToolBar, TB_AUTOSIZE, 0, 0);
+}
+int  App::Run()
+{
+    if(!pApp)
+        return 0;
+    MSG msg = { 0 };
+    timer->Reset();
+    try
+    {
+        while(msg.message != WM_QUIT)
+        {
+            if(PeekMessage(&msg, 0, 0, 0, PM_REMOVE))
+            {
+                TranslateMessage(&msg);
+                DispatchMessage(&msg);
+            }
+
+            timer->Tick();
+            OnKeyboardInput();
+            if(timeStep < timer->Elapsed())
+            {
+                if(running && !paused)
+                    Update();
+                timer->Reset();
+            }
+        }
+        if(scoresChanged)
+            SaveScoresData();
+    }
+    catch(Error err)
+    {
+        const TCHAR* errMsg = nullptr;
+        switch(err)
+        {
+            case Error::ClassRegErr: errMsg = _T("Window class registration failed."); break;
+            case Error::CreateWndErr: errMsg = _T("Window creation failed."); break;
+            case Error::AlreadyExistErr: errMsg = _T("App class object already exists."); break;
+            default: errMsg = _T("WTF?"); break;
+        }
+        MessageBox(0, errMsg, _T("Error"), MB_OK | MB_ICONERROR);
+    }
+    catch(std::bad_alloc&)
+    {
+        MessageBox(0, _T("Not enough memory."), _T("Error"), MB_OK | MB_ICONERROR);
+    }
+    return (int)msg.wParam;
 }
 void App::SpawnFood()
 {
@@ -701,45 +1086,43 @@ void App::Update()
     }
     RedrawWindow(hMainWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE);
 }
-int App::Run()
-{
-    MSG msg = { 0 };
-    timer->Reset();
-    try
-    {
-        while(msg.message != WM_QUIT)
-        {
-            if(PeekMessage(&msg, 0, 0, 0, PM_REMOVE))
-            {
-                TranslateMessage(&msg);
-                DispatchMessage(&msg);
-            }
 
-            timer->Tick();
-            OnKeyboardInput();
-            if(timeStep < timer->Elapsed())
-            {
-                if(running && !paused)
-                    Update();
-                timer->Reset();
-            }
-        }
-    }
-    catch(Error err)
+void  App::ScoresData::Record::BuildRecordStr(bool bEmpty)
+{
+    if(!recordStr)
+        recordStr = std::make_unique<TCHAR[]>(MaxRecordStrLen + 1);
+    recordLength = (bEmpty) ?
+        _stprintf_s(recordStr.get(), MaxRecordStrLen, _T("\n    Empty             0x0       0")) :
+        _stprintf_s(recordStr.get(), MaxRecordStrLen, _T("\n    %-10.10s  %7dx%-2d  %5d"), name.get(), width, height, score);    
+}
+void* App::ScoresData::Record::ReadRecord(void* pMem)
+{
+    if(pMem)
     {
-        const TCHAR* errMsg = nullptr;
-        switch(err)
-        {
-            case Error::ClassRegErr: errMsg = _T("Window class registration failed."); break;
-            case Error::CreateWndErr: errMsg = _T("Window creation failed."); break;
-            case Error::AlreadyExistErr: errMsg = _T("App class object already exists."); break;
-            default: errMsg = _T("WTF?"); break;
-        }
-        MessageBox(0, errMsg, _T("Error"), MB_OK | MB_ICONERROR);
+        uint32_t *it = (uint32_t*)pMem;
+        width = *it++;
+        height = *it++;
+        score = *it++;
+        nameLength = *it++;
+        name = std::make_unique<TCHAR[]>(nameLength + 1);
+        memcpy(name.get(), it, nameLength * sizeof(TCHAR));
+
+        BuildRecordStr(false);
+        return (TCHAR*)it + nameLength;
     }
-    catch(std::bad_alloc&)
+    else
     {
-        MessageBox(0, _T("Not enough memory."), _T("Error"), MB_OK | MB_ICONERROR);
+        BuildRecordStr(true);
+        return nullptr;
     }
-    return (int)msg.wParam;
+}
+void* App::ScoresData::Record::WriteRecord(void* pMem)
+{
+    uint32_t *it = (uint32_t*)pMem;
+    *it++ = width;
+    *it++ = height;
+    *it++ = score;
+    *it++ = nameLength;
+    memcpy(it, name.get(), nameLength * sizeof(TCHAR));
+    return (TCHAR*)it + nameLength;
 }
