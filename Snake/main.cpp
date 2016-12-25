@@ -251,6 +251,7 @@ private:
     bool paused = false;
     bool scoresChanged = false;
 
+    double speed = 0.3;
     double timeStep = 0.3;
 };
 
@@ -480,6 +481,10 @@ LRESULT CALLBACK App::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
         case WM_PAINT: OnPaint(); break;
         case WM_KEYDOWN: OnKeyDown(hwnd, (UINT)wParam, TRUE, (int)LOWORD(lParam), (UINT)HIWORD(lParam)); break;
+        case WM_KEYUP:
+            if(wParam == VK_SPACE)
+                timeStep = speed;
+            break;
         case WM_NOTIFY: OnNotify(hwnd, (int)wParam, (LPNMHDR)lParam); break;
         case WM_COMMAND: OnCommand(hwnd, LOWORD(wParam), (HWND)lParam, (UINT)HIWORD(wParam)); break;
         case WM_CREATE:
@@ -888,7 +893,9 @@ void App::OnKeyDown(HWND hwnd, UINT vk, BOOL fDown, int cRepeat, UINT flags)
     _CRT_UNUSED(cRepeat);
     _CRT_UNUSED(flags);
 
-    if(vk == 'P')
+    if(vk == VK_SPACE)
+        timeStep = std::max(0.1, speed / 3.0);
+    else if(vk == 'P')
         Pause();
     else if(vk == 'O')
         Options();
