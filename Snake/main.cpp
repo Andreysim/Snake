@@ -23,10 +23,6 @@
 #include <numeric>
 #include "resource.h"
 
-typedef std::tuple<uint32_t, uint32_t> OptDlgParam;
-typedef std::tuple<uint32_t, uint32_t, std::unique_ptr<char[]>> ScoresData;
-typedef std::tuple<ScoresData*, uint32_t, uint32_t, uint32_t> RecordsDlgParam;
-
 enum class Error 
 { 
     ClassRegErr,
@@ -39,9 +35,18 @@ class HandleManager
 public:
     HandleManager(HANDLE handle = nullptr) : hHandle(handle == INVALID_HANDLE_VALUE ? nullptr : handle) {}
     HandleManager(const HandleManager&) = delete;
+    HandleManager(HandleManager&& right) noexcept : hHandle(right.release()) {}
+    HandleManager& operator = (HANDLE handle) 
+    {
+        reset(handle); 
+        return *this;
+    }
     HandleManager& operator = (const HandleManager&) = delete;
-    HandleManager(HandleManager&&) = default;
-    HandleManager& operator = (HandleManager&&) = default;
+    HandleManager& operator = (HandleManager&& right) noexcept
+    {
+        reset(right.release());
+        return *this;
+    }
     ~HandleManager() { reset(); }
 
     HANDLE get() const { return hHandle; }
@@ -55,7 +60,7 @@ public:
     {
         if(hHandle)
             CloseHandle(hHandle);
-        hHandle = hNewHandle;
+        hHandle = (hNewHandle == INVALID_HANDLE_VALUE) ? nullptr : hNewHandle;
     }
     bool operator !() const { return hHandle == nullptr; }
     explicit operator bool() const { return hHandle != nullptr; }
@@ -173,9 +178,10 @@ private:
             uint32_t recordLength = 0;
             std::unique_ptr<TCHAR[]> name;
             std::unique_ptr<TCHAR[]> recordStr;
+
+            void  BuildRecordStr(bool bEmpty);
             void* ReadRecord(void* pMem);
             void* WriteRecord(void* pMem);
-            void  BuildRecordStr(bool bEmpty);
         };
         typedef std::unique_ptr<Record> RecordPtr;
         uint32_t nRecords;
@@ -183,8 +189,8 @@ private:
     };
 
 public:
-    static App* GetApp();
     static HINSTANCE AppInstance();
+    static App* GetApp();
 
     App(HINSTANCE hInstance, LPTSTR lpCmdLine, int showCmd);
     App(const App&) = delete;
@@ -208,28 +214,27 @@ private:
     BOOL DeleteScoresSaverExe(LPCTSTR cmdLine);
 
     LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-    ATOM RegisterWindowClass();
+
     void CreateMainWindow(int showCmd);
-    bool LoadScoresData();
-    void ResizeGameArea(uint32_t w, uint32_t h);
-
-    int KeyPressed(int vKey) const;
-    void OnKeyboardInput();
-    void OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT code);
-    void OnNotify(HWND hwnd, int id, LPNMHDR phdr);
-    void OnKeyDown(HWND hwnd, UINT vk, BOOL fDown, int cRepeat, UINT flags);
-    void OnPaint();
-    void Options();
-
-    void NewGame();
-    void Pause();
-    void Update();
-    void SpawnFood();
-
     void EndGame();
+    bool LoadScoresData();
+    void NewGame();
+    void Options();
     void OutScore() const;
+    void Pause();
     void Records(bool bPushRecord);
+    ATOM RegisterWindowClass();
+    void ResizeGameArea(uint32_t w, uint32_t h);
+    void SpawnFood();
+    void Update();
 
+    int  KeyPressed(int vKey) const;
+    void OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT code);
+    void OnKeyboardInput();
+    void OnKeyDown(HWND hwnd, UINT vk, BOOL fDown, int cRepeat, UINT flags);
+    void OnNotify(HWND hwnd, int id, LPNMHDR phdr);
+    void OnPaint();
+    
 private:
     static App* pApp;
     static HINSTANCE hInst;
@@ -480,6 +485,7 @@ LRESULT CALLBACK App::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     switch(msg)
     {
         case WM_PAINT: OnPaint(); break;
+        case WM_ERASEBKGND: return 1;
         case WM_KEYDOWN: OnKeyDown(hwnd, (UINT)wParam, TRUE, (int)LOWORD(lParam), (UINT)HIWORD(lParam)); break;
         case WM_KEYUP:
             if(wParam == VK_SPACE)
@@ -490,11 +496,9 @@ LRESULT CALLBACK App::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_CREATE:
         {
             toolBar = ToolBar(WS_CHILD | WS_BORDER | TBSTYLE_TOOLTIPS, 0, 0, width * BlockSize, BtnSize, hwnd, ID_TOOLBAR, hInst, IDB_TOOLBAR);
-            int menuHeight = GetSystemMetrics(SM_CYMENU);
             RECT rc;
             GetWindowRect(toolBar.hToolBar, &rc);
-            vertIndent = menuHeight + rc.bottom - rc.top - 1;
-
+            vertIndent = rc.bottom - rc.top - 1;
             NewGame();
             break;
         }
@@ -793,6 +797,7 @@ inline HINSTANCE App::AppInstance() { return hInst; }
 inline void App::EndGame()
 {
     running = false; 
+    SendMessage(toolBar.hToolBar, TB_ENABLEBUTTON, (WPARAM)ID_PAUSE_BTN, MAKELPARAM(FALSE, 0));
     Records(true);
 }
 inline App* App::GetApp() { return App::pApp; }
@@ -826,6 +831,18 @@ inline void App::Records(bool bPushRecord)
     DialogBoxParam(hInst, MAKEINTRESOURCE(IDD_SCORE_TABLE_DIALOG), hMainWnd, ScoresDialogProc, (LPARAM)(bPushRecord ? score : 0));
 }
 
+void App::CreateMainWindow(int showCmd)
+{
+    hMainWnd = CreateWindowEx(0, _T("SnakeMainWndClass"), _T("Snake game"), MainWindowStyle, 
+        CW_USEDEFAULT, CW_USEDEFAULT, 0, 0,    0, 0, hInst, nullptr);
+
+    if(!hMainWnd)
+        throw Error::CreateWndErr;
+
+    ResizeGameArea(width, height);
+    ShowWindow(hMainWnd, showCmd);
+    UpdateWindow(hMainWnd);
+}
 bool App::LoadScoresData()
 {
     HRSRC hScoreRes = FindResource(hInst, MAKEINTRESOURCE(IDR_SCOREDATA), RT_RCDATA);
@@ -849,137 +866,19 @@ bool App::LoadScoresData()
     }
     return true;
 }
-void App::CreateMainWindow(int showCmd)
-{
-    hMainWnd = CreateWindowEx(0, _T("SnakeMainWndClass"), _T("Snake game"), MainWindowStyle, 
-        CW_USEDEFAULT, CW_USEDEFAULT, 0, 0,    0, 0, hInst, nullptr);
-
-    if(!hMainWnd)
-        throw Error::CreateWndErr;
-
-    ResizeGameArea(width, height);
-    ShowWindow(hMainWnd, showCmd);
-    UpdateWindow(hMainWnd);
-}
 void App::NewGame()
 {
     running = true;
     paused = true;
     score = 0;
+    timeStep = speed;
     snake->Reset(width, height);
     timer->Reset();
     SpawnFood();
     SendMessage(toolBar.hToolBar, TB_CHANGEBITMAP, ID_PAUSE_BTN, (LPARAM)toolBar.UnpauseImg);
+    SendMessage(toolBar.hToolBar, TB_ENABLEBUTTON, (WPARAM)ID_PAUSE_BTN, MAKELPARAM(TRUE, 0));
     OutScore();
-    RedrawWindow(hMainWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE);
-}
-void App::OnKeyboardInput()
-{
-    if(paused)
-        return;
-    if(KeyPressed(VK_LEFT) && snake->IsValidDirection(Snake::Direction::LEFT))
-        snake->SetDirection(Snake::Direction::LEFT);
-    else if(KeyPressed(VK_RIGHT) && snake->IsValidDirection(Snake::Direction::RIGHT))
-        snake->SetDirection(Snake::Direction::RIGHT);
-    else if(KeyPressed(VK_UP) && snake->IsValidDirection(Snake::Direction::UP))
-        snake->SetDirection(Snake::Direction::UP);
-    else if(KeyPressed(VK_DOWN) && snake->IsValidDirection(Snake::Direction::DOWN))
-        snake->SetDirection(Snake::Direction::DOWN);
-}
-void App::OnKeyDown(HWND hwnd, UINT vk, BOOL fDown, int cRepeat, UINT flags)
-{
-    _CRT_UNUSED(hwnd);
-    _CRT_UNUSED(fDown);
-    _CRT_UNUSED(cRepeat);
-    _CRT_UNUSED(flags);
-
-    if(vk == VK_SPACE)
-        timeStep = std::max(0.1, speed / 3.0);
-    else if(vk == 'P')
-        Pause();
-    else if(vk == 'O')
-        Options();
-    else if(vk == 'N')
-        NewGame();
-}
-void App::OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT code)
-{
-    if(code == 0)
-    {
-        switch(id)
-        {
-            case ID_GAME_OPTIONS: Options(); break;
-            case ID_GAME_CHAMPIONS: Records(false); break;
-            case ID_GAME_EXIT: PostMessage(hwnd, WM_CLOSE, 0, 0);
-        }
-    }
-}
-void App::OnNotify(HWND hwnd, int id, LPNMHDR phdr)
-{
-    _CRT_UNUSED(hwnd);
-    _CRT_UNUSED(id);
-
-    if(phdr->idFrom == ID_TOOLBAR)
-    {
-        if(phdr->code == TBN_GETINFOTIP)
-        {
-            LPNMTBGETINFOTIP ptbit = (LPNMTBGETINFOTIP)phdr;
-            switch(ptbit->iItem)
-            {
-                case ID_OPT_BTN:
-                    ptbit->pszText = _T("Options (O)");
-                    break;
-                case ID_NEW_GAME_BTN:
-                    ptbit->pszText = _T("Start new game (N)");
-                    break;
-                case ID_PAUSE_BTN:
-                    ptbit->pszText = paused ? _T("Resume (P)") : _T("Pause (P)");
-                    break;
-            }
-            ptbit->cchTextMax = _tcslen(ptbit->pszText) + 1;
-        }
-        else if(phdr->code == NM_CLICK)
-        {
-            LPNMMOUSE pnmm = (LPNMMOUSE)phdr;
-            switch(pnmm->dwItemSpec)
-            {
-                case ID_OPT_BTN: Options(); break;
-                case ID_NEW_GAME_BTN: NewGame(); break;
-                case ID_PAUSE_BTN: Pause(); break;
-            }
-        }
-    }
-}
-void App::OnPaint()
-{
-    PAINTSTRUCT ps;
-    HDC hdc = BeginPaint(hMainWnd, &ps);
-    HDC hMemDC = CreateCompatibleDC(hdc);
-
-    uint32_t pw = width * BlockSize, ph = height * BlockSize;
-
-    HBITMAP hBitMap = CreateCompatibleBitmap(hdc, pw, ph);
-    hBitMap = (HBITMAP)SelectObject(hMemDC, hBitMap);
-
-    //Fill bitmap with BkColor color
-    {
-        HBRUSH hBr = CreateSolidBrush(BkColor);
-        RECT rc = { 0, 0, (LONG)pw, (LONG)ph };
-        FillRect(hMemDC, &rc, hBr);
-        DeleteObject(hBr);
-    }
-
-    snake->Draw(hMemDC);
-    if(running)
-        food->Draw(hMemDC);
-
-    // Copy bitmap to device
-    BitBlt(hdc, 0, vertIndent - GetSystemMetrics(SM_CYMENU), pw, ph, hMemDC, 0, 0, SRCCOPY);
-
-    DeleteObject(SelectObject(hMemDC, hBitMap));
-    DeleteDC(hMemDC);
-
-    EndPaint(hMainWnd, &ps);
+    RedrawWindow(hMainWnd, nullptr, nullptr, RDW_INVALIDATE);
 }
 ATOM App::RegisterWindowClass()
 {
@@ -998,7 +897,7 @@ void App::ResizeGameArea(uint32_t w, uint32_t h)
 {
     width = std::max(MinWidth, std::min(w, MaxWidth));
     height = std::max(MinHeight, std::min(h, MaxHeight));
-    RECT wndRect, adjRect = { 0, 0, (LONG)(width * BlockSize), (LONG)(height * BlockSize + vertIndent) };
+    RECT wndRect, adjRect = { 0, 0, (LONG)(width * BlockSize), (LONG)(height * BlockSize + vertIndent + GetSystemMetrics(SM_CYMENU)) };
     AdjustWindowRectEx(&adjRect, MainWindowStyle, FALSE, 0);
     GetWindowRect(hMainWnd, &wndRect);
     wndRect.right = adjRect.right - adjRect.left;
@@ -1075,6 +974,7 @@ void App::Update()
         EndGame();
         return;
     }
+    RECT rc = { 0, (LONG)vertIndent, (LONG)(width * BlockSize), (LONG)(height * BlockSize + vertIndent) };
     if(snake->GetHead() == food->GetPos())
     {
         snake->Eat();
@@ -1083,7 +983,7 @@ void App::Update()
         if(snake->BodySize() == width * height)
         {
             EndGame();
-            RedrawWindow(hMainWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE);
+            InvalidateRect(hMainWnd, &rc, FALSE);
             MessageBox(hMainWnd, _T("You reached maximum snake length!"), _T("Message"), MB_OK);
             return;
         }
@@ -1091,7 +991,116 @@ void App::Update()
             SpawnFood();
 
     }
-    RedrawWindow(hMainWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE);
+    InvalidateRect(hMainWnd, &rc, FALSE);
+}
+
+void App::OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT code)
+{
+    if(code == 0)
+    {
+        switch(id)
+        {
+            case ID_GAME_OPTIONS: Options(); break;
+            case ID_GAME_CHAMPIONS: Records(false); break;
+            case ID_GAME_EXIT: PostMessage(hwnd, WM_CLOSE, 0, 0);
+        }
+    }
+}
+void App::OnKeyboardInput()
+{
+    if(paused)
+        return;
+    if(KeyPressed(VK_LEFT) && snake->IsValidDirection(Snake::Direction::LEFT))
+        snake->SetDirection(Snake::Direction::LEFT);
+    else if(KeyPressed(VK_RIGHT) && snake->IsValidDirection(Snake::Direction::RIGHT))
+        snake->SetDirection(Snake::Direction::RIGHT);
+    else if(KeyPressed(VK_UP) && snake->IsValidDirection(Snake::Direction::UP))
+        snake->SetDirection(Snake::Direction::UP);
+    else if(KeyPressed(VK_DOWN) && snake->IsValidDirection(Snake::Direction::DOWN))
+        snake->SetDirection(Snake::Direction::DOWN);
+}
+void App::OnKeyDown(HWND hwnd, UINT vk, BOOL fDown, int cRepeat, UINT flags)
+{
+    _CRT_UNUSED(hwnd);
+    _CRT_UNUSED(fDown);
+    _CRT_UNUSED(cRepeat);
+    _CRT_UNUSED(flags);
+
+    if(vk == VK_SPACE)
+        timeStep = std::max(0.1, speed / 3.0);
+    else if(vk == 'P')
+        Pause();
+    else if(vk == 'O')
+        Options();
+    else if(vk == 'N')
+        NewGame();
+}
+void App::OnNotify(HWND hwnd, int id, LPNMHDR phdr)
+{
+    _CRT_UNUSED(hwnd);
+    _CRT_UNUSED(id);
+
+    if(phdr->idFrom == ID_TOOLBAR)
+    {
+        if(phdr->code == TBN_GETINFOTIP)
+        {
+            LPNMTBGETINFOTIP ptbit = (LPNMTBGETINFOTIP)phdr;
+            switch(ptbit->iItem)
+            {
+                case ID_OPT_BTN:
+                    ptbit->pszText = _T("Options (O)");
+                    break;
+                case ID_NEW_GAME_BTN:
+                    ptbit->pszText = _T("Start new game (N)");
+                    break;
+                case ID_PAUSE_BTN:
+                    ptbit->pszText = paused ? _T("Resume (P)") : _T("Pause (P)");
+                    break;
+            }
+            ptbit->cchTextMax = _tcslen(ptbit->pszText) + 1;
+        }
+        else if(phdr->code == NM_CLICK)
+        {
+            LPNMMOUSE pnmm = (LPNMMOUSE)phdr;
+            switch(pnmm->dwItemSpec)
+            {
+                case ID_OPT_BTN: Options(); break;
+                case ID_NEW_GAME_BTN: NewGame(); break;
+                case ID_PAUSE_BTN: Pause(); break;
+            }
+        }
+    }
+}
+void App::OnPaint()
+{
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hMainWnd, &ps);
+    HDC hMemDC = CreateCompatibleDC(hdc);
+
+    uint32_t pw = width * BlockSize, ph = height * BlockSize;
+
+    HBITMAP hBitMap = CreateCompatibleBitmap(hdc, pw, ph);
+    hBitMap = (HBITMAP)SelectObject(hMemDC, hBitMap);
+
+    //Fill bitmap with BkColor color
+    {
+        HBRUSH hBr = CreateSolidBrush(BkColor);
+        RECT rc = { 0, 0, (LONG)pw, (LONG)ph };
+        FillRect(hMemDC, &rc, hBr);
+        DeleteObject(hBr);
+    }
+
+    snake->Draw(hMemDC);
+    if(running)
+        food->Draw(hMemDC);
+
+    // Copy bitmap to device
+    BitBlt(hdc, 0, vertIndent, pw, ph, hMemDC, 0, 0, SRCCOPY);
+
+    DeleteObject(SelectObject(hMemDC, hBitMap));
+    DeleteDC(hMemDC);
+
+    EndPaint(hMainWnd, &ps);
 }
 
 void  App::ScoresData::Record::BuildRecordStr(bool bEmpty)

@@ -33,9 +33,18 @@ class HandleManager
 public:
     HandleManager(HANDLE handle = nullptr) : hHandle(handle == INVALID_HANDLE_VALUE ? nullptr : handle) {}
     HandleManager(const HandleManager&) = delete;
+    HandleManager(HandleManager&& right) noexcept : hHandle(right.release()) {}
+    HandleManager& operator = (HANDLE handle) 
+    {
+        reset(handle); 
+        return *this;
+    }
     HandleManager& operator = (const HandleManager&) = delete;
-    HandleManager(HandleManager&&) = default;
-    HandleManager& operator = (HandleManager&&) = default;
+    HandleManager& operator = (HandleManager&& right) noexcept
+    {
+        reset(right.release());
+        return *this;
+    }
     ~HandleManager() { reset(); }
 
     HANDLE get() const { return hHandle; }
@@ -49,10 +58,10 @@ public:
     {
         if(hHandle)
             CloseHandle(hHandle);
-        hHandle = hNewHandle;
+        hHandle = (hNewHandle == INVALID_HANDLE_VALUE) ? nullptr : hNewHandle;
     }
     bool operator !() const { return hHandle == nullptr; }
-    explicit operator bool() const { return !*this; }
+    explicit operator bool() const { return hHandle != nullptr; }
 private:
     HANDLE hHandle;
 };
